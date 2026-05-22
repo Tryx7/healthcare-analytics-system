@@ -223,7 +223,7 @@ curl -X GET "http://localhost:8000/health"
 
 1. **Install Vercel CLI**
    ```bash
-   npm i -g vercel
+   sudo npm i -g vercel
    ```
 
 2. **Create vercel.json**
