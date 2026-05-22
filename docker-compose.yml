@@ -1,4 +1,4 @@
-# version: '3.8'
+version: '3.8'
 
 services:
   api:
@@ -7,15 +7,15 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DB_HOST: pg-c63647-lagatkjosiah-692c.c.aivencloud.com
-      DB_PORT: 24862
-      DB_NAME: defaultdb
-      DB_USER: avnadmin
-      DB_PASSWORD: AVNS_G1ajzCj_WUpXrLzc-3t
-      DB_SSL_MODE: require
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_SSL_MODE=${DB_SSL_MODE}
+    env_file:
+      - .env
     volumes:
       - ./models:/app/models
       - ./data:/app/data
-
-volumes:
-  postgres_data:
+    restart: unless-stopped

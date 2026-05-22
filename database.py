@@ -1,4 +1,3 @@
-
 """
 PostgreSQL Database Module for Healthcare Analytics
 Handles all database operations including schema creation, data insertion, and querying.
@@ -14,15 +13,18 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database configuration - Aiven PostgreSQL
+# Database configuration - Load from environment variables
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'pg-c63647-lagatkjosiah-692c.c.aivencloud.com'),
-    'port': os.getenv('DB_PORT', '24862'),
-    'database': os.getenv('DB_NAME', 'defaultdb'),
-    'user': os.getenv('DB_USER', 'avnadmin'),
-    'password': os.getenv('DB_PASSWORD', 'AVNS_G1ajzCj_WUpXrLzc-3t'),
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT'),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
     'sslmode': os.getenv('DB_SSL_MODE', 'require')
 }
+
+# Remove None values (for optional configs)
+DB_CONFIG = {k: v for k, v in DB_CONFIG.items() if v is not None}
 
 class HealthcareDatabase:
     def __init__(self, config=None):
@@ -32,6 +34,9 @@ class HealthcareDatabase:
     @contextmanager
     def get_connection(self):
         """Context manager for database connections"""
+        if not self.config:
+            raise ValueError("Database configuration is missing. Set environment variables.")
+        
         config = self.config.copy()
         # Add SSL CA certificate if provided
         ssl_ca = os.getenv('DB_SSL_CA')
@@ -61,7 +66,7 @@ class HealthcareDatabase:
     def create_schema(self):
         """Create database schema for healthcare data"""
         schema_sql = """
-        -- Drop tables if they exist
+        -- Drop tables if they exist (use with caution in production)
         DROP TABLE IF EXISTS predictions CASCADE;
         DROP TABLE IF EXISTS patient_records CASCADE;
         DROP TABLE IF EXISTS model_metadata CASCADE;
@@ -265,6 +270,9 @@ class HealthcareDatabase:
 
 
 if __name__ == "__main__":
-    db = HealthcareDatabase()
-    db.create_schema()
-    print("Database initialized successfully")
+    if not DB_CONFIG:
+        print("No database configuration found. Set environment variables.")
+    else:
+        db = HealthcareDatabase()
+        db.create_schema()
+        print("Database initialized successfully")

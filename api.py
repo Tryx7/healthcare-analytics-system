@@ -1,4 +1,3 @@
-
 """
 Standalone Healthcare Analytics API
 Works without PostgreSQL - uses pre-trained model and in-memory data.
@@ -22,15 +21,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Aiven PostgreSQL Configuration (optional - for full features)
+# Aiven PostgreSQL Configuration - Load from environment variables
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'pg-c63647-lagatkjosiah-692c.c.aivencloud.com'),
-    'port': os.getenv('DB_PORT', '24862'),
-    'database': os.getenv('DB_NAME', 'defaultdb'),
-    'user': os.getenv('DB_USER', 'avnadmin'),
-    'password': os.getenv('DB_PASSWORD', 'AVNS_G1ajzCj_WUpXrLzc-3t'),
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT'),
+    'database': os.getenv('DB_NAME'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
     'sslmode': os.getenv('DB_SSL_MODE', 'require')
 }
+
+# Remove any None values
+DB_CONFIG = {k: v for k, v in DB_CONFIG.items() if v is not None}
 
 # Load pre-trained model on startup
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'model_latest.pkl')

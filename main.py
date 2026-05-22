@@ -1,4 +1,3 @@
-
 """
 FastAPI Application for Healthcare Analytics System
 Provides REST API endpoints for predictions, data management, and model info.
@@ -24,16 +23,6 @@ from scheduler import start_scheduler_in_background, create_apscheduler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Aiven PostgreSQL Configuration
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'pg-c63647-lagatkjosiah-692c.c.aivencloud.com'),
-    'port': os.getenv('DB_PORT', '24862'),
-    'database': os.getenv('DB_NAME', 'defaultdb'),
-    'user': os.getenv('DB_USER', 'avnadmin'),
-    'password': os.getenv('DB_PASSWORD', 'AVNS_G1ajzCj_WUpXrLzc-3t'),
-    'sslmode': os.getenv('DB_SSL_MODE', 'require')
-}
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -141,8 +130,9 @@ async def startup_event():
     # Initialize database
     try:
         database = get_db()
-        database.create_schema()
-        logger.info("Database initialized")
+        if database.config:  # Only create schema if config exists
+            database.create_schema()
+            logger.info("Database initialized")
     except Exception as e:
         logger.warning(f"Database initialization warning: {e}")
 
@@ -248,6 +238,9 @@ async def add_patient(patient: PatientData):
     """Add a new patient record to the database"""
     try:
         database = get_db()
+        
+        if not database.config:
+            return {"message": "Patient data received but not stored (database not configured)", "patient": patient.dict()}
 
         # Convert to DataFrame
         df = pd.DataFrame([patient.dict()])
@@ -313,6 +306,8 @@ async def get_statistics():
     """Get database statistics"""
     try:
         database = get_db()
+        if not database.config:
+            return {"message": "Database not configured"}
         stats = database.get_statistics()
         return stats
     except Exception as e:
@@ -325,6 +320,9 @@ async def get_patients(limit: int = 100, offset: int = 0):
     """Get patient records with pagination"""
     try:
         database = get_db()
+        if not database.config:
+            return {"message": "Database not configured", "patients": []}
+            
         query = f"SELECT * FROM patient_records LIMIT {limit} OFFSET {offset}"
 
         with database.get_connection() as conn:
