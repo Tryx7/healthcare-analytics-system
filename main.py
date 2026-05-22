@@ -3,18 +3,24 @@ FastAPI Application for Healthcare Analytics System
 Provides REST API endpoints for predictions, data management, and model info.
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import numpy as np
 import os
+import json
 import logging
 from datetime import datetime
-from enum import Enum
+import joblib
 
-# Setup logging
+# Import our modules
+from data_cleaning import HealthcareDataCleaner
+from database import HealthcareDatabase
+from ml_model import HealthcareMLModel, retrain_model
+from scheduler import start_scheduler_in_background, create_apscheduler
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -34,27 +40,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Simplified Prediction Request with all optional fields
-class PredictionRequest(BaseModel):
+# Global model instance
+model = None
+db = None
+
+def get_model():
+    """Get or load the ML model"""
+    global model
+    if model is None:
+        # Try to load latest model
+        model_dir = 'models'
+        if os.path.exists(model_dir):
+            model_files = [f for f in os.listdir(model_dir) if f.endswith('.pkl')]
+            if model_files:
+                latest_model = sorted(model_files)[-1]
+                model_path = os.path.join(model_dir, latest_model)
+                model = HealthcareMLModel()
+                model.load_model(model_path)
+                logger.info(f"Loaded model: {latest_model}")
+            else:
+                logger.warning("No trained model found")
+    return model
+
+def get_db():
+    """Get database instance"""
+    global db
+    if db is None:
+        db = HealthcareDatabase()
+    return db
+
+# Pydantic models for request/response
+class PatientData(BaseModel):
+    name: str = Field(..., description="Patient name")
     age: int = Field(..., ge=0, le=120, description="Patient age")
-    gender: str = Field(default="Unknown", description="Gender: Male, Female, or Other")
-    blood_type: str = Field(default="Unknown", description="Blood type")
-    medical_condition: str = Field(default="Unknown", description="Medical condition")
-    admission_type: str = Field(default="Routine", description="Admission type")
-    billing_amount: Optional[float] = Field(default=5000.0, description="Billing amount")
-    length_of_stay: Optional[int] = Field(default=3, description="Length of hospital stay")
-    medication: Optional[str] = Field(default="None", description="Prescribed medication")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "age": 65,
-                "gender": "Male",
-                "blood_type": "A+",
-                "medical_condition": "Heart Disease",
-                "admission_type": "Emergency"
-            }
-        }
+    gender: str = Field(..., description="Gender: Male, Female, or Other")
+    blood_type: str = Field(..., description="Blood type: A+, A-, B+, B-, AB+, AB-, O+, O-")
+    medical_condition: str = Field(..., description="Medical condition")
+    date_of_admission: str = Field(..., description="Admission date (YYYY-MM-DD)")
+    doctor: str = Field(..., description="Doctor name")
+    hospital: str = Field(..., description="Hospital name")
+    insurance_provider: str = Field(..., description="Insurance provider")
+    billing_amount: float = Field(..., ge=0, description="Billing amount")
+    room_number: int = Field(..., ge=1, description="Room number")
+    admission_type: str = Field(..., description="Admission type: Emergency, Elective, Urgent")
+    discharge_date: str = Field(..., description="Discharge date (YYYY-MM-DD)")
+    medication: str = Field(..., description="Prescribed medication")
+
+class PredictionRequest(BaseModel):
+    age: int = Field(..., ge=0, le=120)
+    gender: str
+    blood_type: str
+    medical_condition: str
+    admission_type: str
+    billing_amount: float = Field(..., ge=0)
+    length_of_stay: int = Field(..., ge=0)
+    age_group: str
+    billing_category: str
+    medication: str
 
 class PredictionResponse(BaseModel):
     predicted_result: str
@@ -62,11 +104,16 @@ class PredictionResponse(BaseModel):
     probabilities: Dict[str, float]
     model_version: str
     timestamp: str
-    patient_age: int
-    medical_condition: str
 
 class BatchPredictionRequest(BaseModel):
     patients: List[PredictionRequest]
+
+class ModelInfo(BaseModel):
+    version: str
+    metrics: Dict[str, Any]
+    feature_importance: Dict[str, float]
+    classes: List[str]
+    feature_columns: List[str]
 
 class HealthCheck(BaseModel):
     status: str
@@ -74,237 +121,236 @@ class HealthCheck(BaseModel):
     model_version: Optional[str]
     timestamp: str
 
-# Rule-based prediction function (no ML model needed)
-def predict_healthcare(age: int, medical_condition: str, admission_type: str = "Routine") -> tuple:
-    """
-    Advanced rule-based prediction for healthcare test results
-    Returns: (prediction, confidence, probabilities_dict)
-    """
-    
-    # Define risk levels for conditions
-    high_risk_conditions = [
-        "Heart Disease", "Kidney Disease", "Liver Disease", 
-        "COPD", "Cancer", "Stroke", "Pneumonia"
-    ]
-    medium_risk_conditions = [
-        "Diabetes", "Hypertension", "Asthma", "Arthritis",
-        "Thyroid Disorder", "Anemia", "COVID-19"
-    ]
-    low_risk_conditions = [
-        "Healthy", "Flu", "Migraine", "Bronchitis", "Infection"
-    ]
-    
-    # Base probabilities by age group
-    if age > 70:
-        base_probs = {"Normal": 0.10, "Abnormal": 0.80, "Inconclusive": 0.10}
-        base_confidence = 0.80
-    elif age > 60:
-        base_probs = {"Normal": 0.15, "Abnormal": 0.75, "Inconclusive": 0.10}
-        base_confidence = 0.75
-    elif age > 50:
-        base_probs = {"Normal": 0.30, "Abnormal": 0.55, "Inconclusive": 0.15}
-        base_confidence = 0.65
-    elif age > 40:
-        base_probs = {"Normal": 0.50, "Abnormal": 0.35, "Inconclusive": 0.15}
-        base_confidence = 0.60
-    elif age > 30:
-        base_probs = {"Normal": 0.65, "Abnormal": 0.20, "Inconclusive": 0.15}
-        base_confidence = 0.70
-    elif age >= 18:
-        base_probs = {"Normal": 0.80, "Abnormal": 0.10, "Inconclusive": 0.10}
-        base_confidence = 0.85
-    else:
-        base_probs = {"Normal": 0.85, "Abnormal": 0.05, "Inconclusive": 0.10}
-        base_confidence = 0.90
-    
-    # Adjust based on medical condition
-    if medical_condition in high_risk_conditions:
-        base_probs["Abnormal"] += 0.20
-        base_probs["Normal"] -= 0.15
-        base_probs["Inconclusive"] -= 0.05
-        base_confidence = min(0.95, base_confidence + 0.10)
-    elif medical_condition in medium_risk_conditions:
-        base_probs["Abnormal"] += 0.10
-        base_probs["Normal"] -= 0.10
-        base_confidence = min(0.90, base_confidence + 0.05)
-    elif medical_condition in low_risk_conditions:
-        base_probs["Normal"] += 0.10
-        base_probs["Abnormal"] -= 0.05
-        base_probs["Inconclusive"] -= 0.05
-        base_confidence = min(0.95, base_confidence + 0.05)
-    
-    # Adjust based on admission type
-    if admission_type == "Emergency":
-        base_probs["Abnormal"] += 0.10
-        base_probs["Normal"] -= 0.05
-        base_probs["Inconclusive"] -= 0.05
-        base_confidence = min(0.95, base_confidence + 0.05)
-    elif admission_type == "Urgent":
-        base_probs["Abnormal"] += 0.05
-        base_probs["Normal"] -= 0.03
-        base_probs["Inconclusive"] -= 0.02
-    
-    # Clamp values between 0 and 1
-    for key in base_probs:
-        base_probs[key] = max(0.0, min(1.0, base_probs[key]))
-    
-    # Normalize to sum to 1
-    total = sum(base_probs.values())
-    if total > 0:
-        base_probs = {k: v/total for k, v in base_probs.items()}
-    else:
-        base_probs = {"Normal": 0.34, "Abnormal": 0.33, "Inconclusive": 0.33}
-    
-    # Determine prediction (highest probability)
-    prediction = max(base_probs, key=base_probs.get)
-    confidence = base_probs[prediction]
-    
-    return prediction, round(confidence, 3), {k: round(v, 3) for k, v in base_probs.items()}
-
+# Startup event
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup"""
-    logger.info("Starting up Healthcare Analytics API on Vercel...")
-    logger.info("API startup complete - using rule-based predictions")
+    logger.info("Starting up Healthcare Analytics API...")
 
+    # Initialize database
+    try:
+        database = get_db()
+        if database.config:  # Only create schema if config exists
+            database.create_schema()
+            logger.info("Database initialized")
+    except Exception as e:
+        logger.warning(f"Database initialization warning: {e}")
+
+    # Load model
+    get_model()
+
+    # Start scheduler in background
+    try:
+        scheduler = create_apscheduler()
+        if scheduler:
+            scheduler.start()
+            logger.info("APScheduler started for weekly retraining")
+        else:
+            start_scheduler_in_background()
+    except Exception as e:
+        logger.warning(f"Scheduler startup warning: {e}")
+
+    logger.info("API startup complete")
+
+# Health check endpoint
+@app.get("/health", response_model=HealthCheck)
+async def health_check():
+    """Check API health status"""
+    current_model = get_model()
+    return HealthCheck(
+        status="healthy",
+        model_loaded=current_model is not None,
+        model_version=current_model.model_version if current_model else None,
+        timestamp=datetime.now().isoformat()
+    )
+
+# Predict endpoint
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(request: PredictionRequest):
+    """Predict test result for a single patient"""
+    current_model = get_model()
+
+    if current_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        # Convert request to DataFrame
+        input_data = pd.DataFrame([request.dict()])
+
+        # Make prediction
+        predictions, confidences, probabilities = current_model.predict(input_data)
+
+        # Build probability dict
+        prob_dict = {}
+        for i, cls in enumerate(current_model.target_encoder.classes_):
+            prob_dict[cls] = float(probabilities[0][i])
+
+        return PredictionResponse(
+            predicted_result=predictions[0],
+            confidence=float(confidences[0]),
+            probabilities=prob_dict,
+            model_version=current_model.model_version,
+            timestamp=datetime.now().isoformat()
+        )
+
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Batch predict endpoint
+@app.post("/predict/batch")
+async def predict_batch(request: BatchPredictionRequest):
+    """Predict test results for multiple patients"""
+    current_model = get_model()
+
+    if current_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    try:
+        input_data = pd.DataFrame([p.dict() for p in request.patients])
+        predictions, confidences, probabilities = current_model.predict(input_data)
+
+        results = []
+        for i in range(len(predictions)):
+            prob_dict = {}
+            for j, cls in enumerate(current_model.target_encoder.classes_):
+                prob_dict[cls] = float(probabilities[i][j])
+
+            results.append({
+                "predicted_result": predictions[i],
+                "confidence": float(confidences[i]),
+                "probabilities": prob_dict
+            })
+
+        return {
+            "predictions": results,
+            "model_version": current_model.model_version,
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Batch prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Add patient endpoint
+@app.post("/patients")
+async def add_patient(patient: PatientData):
+    """Add a new patient record to the database"""
+    try:
+        database = get_db()
+        
+        if not database.config:
+            return {"message": "Patient data received but not stored (database not configured)", "patient": patient.dict()}
+
+        # Convert to DataFrame
+        df = pd.DataFrame([patient.dict()])
+
+        # Calculate derived fields
+        df['date_of_admission'] = pd.to_datetime(df['date_of_admission'])
+        df['discharge_date'] = pd.to_datetime(df['discharge_date'])
+        df['length_of_stay'] = (df['discharge_date'] - df['date_of_admission']).dt.days
+        df['length_of_stay'] = df['length_of_stay'].clip(lower=0)
+
+        df['age_group'] = pd.cut(df['age'], 
+                                  bins=[0, 18, 35, 50, 65, 120], 
+                                  labels=['Child', 'Young Adult', 'Adult', 'Senior', 'Elderly'])
+
+        df['billing_category'] = pd.cut(df['billing_amount'],
+                                         bins=[0, 5000, 15000, 30000, float('inf')],
+                                         labels=['Low', 'Medium', 'High', 'Very High'])
+
+        database.insert_patient_records(df)
+
+        return {"message": "Patient added successfully", "patient": patient.dict()}
+
+    except Exception as e:
+        logger.error(f"Error adding patient: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Get model info endpoint
+@app.get("/model/info", response_model=ModelInfo)
+async def get_model_info():
+    """Get current model information and metrics"""
+    current_model = get_model()
+
+    if current_model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    return ModelInfo(**current_model.get_model_summary())
+
+# Retrain endpoint
+@app.post("/model/retrain")
+async def trigger_retrain(background_tasks: BackgroundTasks, model_type: str = "random_forest"):
+    """Trigger model retraining (runs in background)"""
+    def retrain_task():
+        try:
+            retrain_model(model_type=model_type)
+            # Reload model after retraining
+            global model
+            model = None
+            get_model()
+        except Exception as e:
+            logger.error(f"Retraining failed: {e}")
+
+    background_tasks.add_task(retrain_task)
+
+    return {
+        "message": "Model retraining started in background",
+        "model_type": model_type,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# Statistics endpoint
+@app.get("/statistics")
+async def get_statistics():
+    """Get database statistics"""
+    try:
+        database = get_db()
+        if not database.config:
+            return {"message": "Database not configured"}
+        stats = database.get_statistics()
+        return stats
+    except Exception as e:
+        logger.error(f"Error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Get all patients endpoint
+@app.get("/patients")
+async def get_patients(limit: int = 100, offset: int = 0):
+    """Get patient records with pagination"""
+    try:
+        database = get_db()
+        if not database.config:
+            return {"message": "Database not configured", "patients": []}
+            
+        query = f"SELECT * FROM patient_records LIMIT {limit} OFFSET {offset}"
+
+        with database.get_connection() as conn:
+            df = pd.read_sql(query, conn)
+            return df.to_dict('records')
+
+    except Exception as e:
+        logger.error(f"Error getting patients: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Root endpoint
 @app.get("/")
 async def root():
     """API root - provides basic info"""
     return {
         "name": "Healthcare Analytics API",
         "version": "1.0.0",
-        "description": "Healthcare test result prediction system",
-        "status": "running on Vercel",
-        "prediction_mode": "Rule-based (ML model optional)",
+        "description": "ML-powered healthcare test result prediction system",
         "endpoints": {
-            "/": "This help message",
-            "/health": "Health check",
-            "/predict": "POST - Single prediction",
-            "/predict/batch": "POST - Batch predictions",
-            "/predict/demo": "GET - Demo predictions",
-            "/docs": "Swagger documentation"
+            "health": "/health",
+            "predict": "/predict (POST)",
+            "predict_batch": "/predict/batch (POST)",
+            "add_patient": "/patients (POST)",
+            "get_patients": "/patients (GET)",
+            "model_info": "/model/info",
+            "retrain": "/model/retrain (POST)",
+            "statistics": "/statistics"
         }
-    }
-
-@app.get("/health", response_model=HealthCheck)
-async def health_check():
-    """Check API health status"""
-    return HealthCheck(
-        status="healthy",
-        model_loaded=False,
-        model_version="rule-based-v1",
-        timestamp=datetime.now().isoformat()
-    )
-
-@app.post("/predict", response_model=PredictionResponse)
-async def predict(request: PredictionRequest):
-    """Predict test result for a single patient"""
-    try:
-        logger.info(f"Processing prediction for age: {request.age}, condition: {request.medical_condition}")
-        
-        # Get prediction using rule-based system
-        prediction, confidence, probabilities = predict_healthcare(
-            request.age,
-            request.medical_condition,
-            request.admission_type
-        )
-        
-        return PredictionResponse(
-            predicted_result=prediction,
-            confidence=confidence,
-            probabilities=probabilities,
-            model_version="rule-based-v1",
-            timestamp=datetime.now().isoformat(),
-            patient_age=request.age,
-            medical_condition=request.medical_condition
-        )
-        
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/predict/batch")
-async def predict_batch(request: BatchPredictionRequest):
-    """Predict test results for multiple patients"""
-    try:
-        results = []
-        for patient in request.patients:
-            prediction, confidence, probabilities = predict_healthcare(
-                patient.age,
-                patient.medical_condition,
-                patient.admission_type
-            )
-            
-            results.append({
-                "predicted_result": prediction,
-                "confidence": confidence,
-                "probabilities": probabilities,
-                "patient_age": patient.age,
-                "medical_condition": patient.medical_condition
-            })
-        
-        return {
-            "predictions": results,
-            "total": len(results),
-            "model_version": "rule-based-v1",
-            "timestamp": datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        logger.error(f"Batch prediction error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/predict/demo")
-async def get_demo_predictions():
-    """Get demo predictions for common scenarios"""
-    demo_cases = [
-        {"age": 75, "condition": "Heart Disease", "admission": "Emergency", "desc": "Elderly with heart disease"},
-        {"age": 45, "condition": "Diabetes", "admission": "Urgent", "desc": "Middle-aged with diabetes"},
-        {"age": 25, "condition": "Healthy", "admission": "Routine", "desc": "Young healthy patient"},
-        {"age": 35, "condition": "Asthma", "admission": "Emergency", "desc": "Adult with asthma attack"},
-        {"age": 68, "condition": "Hypertension", "admission": "Routine", "desc": "Senior with hypertension"},
-        {"age": 52, "condition": "Cancer", "admission": "Emergency", "desc": "Cancer patient emergency"},
-        {"age": 19, "condition": "Flu", "admission": "Urgent", "desc": "Young adult with flu"},
-        {"age": 82, "condition": "COPD", "admission": "Emergency", "desc": "Elderly with COPD"}
-    ]
-    
-    results = []
-    for case in demo_cases:
-        prediction, confidence, probs = predict_healthcare(
-            case["age"], 
-            case["condition"],
-            case["admission"]
-        )
-        results.append({
-            "description": case["desc"],
-            "age": case["age"],
-            "medical_condition": case["condition"],
-            "admission_type": case["admission"],
-            "prediction": prediction,
-            "confidence": confidence,
-            "probabilities": probs
-        })
-    
-    return {
-        "demo_predictions": results,
-        "note": "These are rule-based predictions based on age and medical condition"
-    }
-
-@app.get("/model/info")
-async def get_model_info():
-    """Get model information"""
-    return {
-        "model_loaded": False,
-        "model_type": "Rule-based Expert System",
-        "model_version": "v1.0.0",
-        "features_used": ["age", "medical_condition", "admission_type"],
-        "prediction_classes": ["Normal", "Abnormal", "Inconclusive"],
-        "risk_factors": {
-            "high_risk": ["Heart Disease", "Kidney Disease", "Liver Disease", "COPD", "Cancer"],
-            "medium_risk": ["Diabetes", "Hypertension", "Asthma", "Arthritis", "COVID-19"],
-            "low_risk": ["Healthy", "Flu", "Migraine", "Infection"]
-        },
-        "deployment": "Vercel Serverless"
     }
 
 if __name__ == "__main__":
