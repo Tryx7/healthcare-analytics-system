@@ -64,3 +64,4 @@ credentials/
 htmlcov/
 .tox/
 EOF
+.vercel

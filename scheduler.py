@@ -83,6 +83,27 @@ def create_apscheduler():
     except ImportError:
         logger.warning("APScheduler not installed. Using schedule library instead.")
         return None
+    
+
+# Add this to your existing scheduler.py
+def retrain_job():
+    """Job to retrain the model using your existing ml_model.py"""
+    logger.info("="*50)
+    logger.info("Starting scheduled model retraining")
+    
+    try:
+        # Use your existing retrain_model function from ml_model.py
+        from ml_model import retrain_model
+        model = retrain_model(data_source='database', model_type='random_forest')
+        
+        if model:
+            logger.info(f"✅ Model retrained successfully. Version: {model.model_version}")
+            logger.info(f"Accuracy: {model.metrics.get('accuracy', 'N/A')}")
+        else:
+            logger.warning("⚠️ Model retraining returned None")
+            
+    except Exception as e:
+        logger.error(f"❌ Error during model retraining: {e}", exc_info=True)
 
 if __name__ == "__main__":
     # For testing: Run retraining immediately
